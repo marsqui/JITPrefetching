@@ -1,37 +1,28 @@
-import os
-import sys
-import time
-import hashlib
-import urllib2
-import itertools
-import threading
-import multiprocessing
-import cPickle as pickle
-import multiprocessing.pool
-from itertools import chain
-from datetime import datetime as dt
 from swift.common.swob import Response
-from sys import argv, getsizeof, stderr
-from collections import deque, OrderedDict
 from swift.common.internal_client import InternalClient
 from swiftclient.service import SwiftService, SwiftError
+import itertools
+import threading
+from sys import argv
+import multiprocessing
+import multiprocessing.pool
+from datetime import datetime as dt
+import cPickle as pickle
+import hashlib
+import urllib2
+import time
+import os
 
-################### CONFIGURATION ###################
-TOTALSECONDS = 60 #allowed time diff in seconds between previous and next object
-PROB_THRESHOLD = 0.5 #minimum probability to be prefetched
-N_THREADS = 5 #number of threads in the download threadpool
-AUTOSAVE = 30 #autosave chain each X seconds
-MAX_PREFETCHED_SIZE =  1073741824 #1Gb of prefetched objects
-PREFETCH = True #Enables prefetching objects. If False it just updates the chain
-DELETE_WHEN_SERVED = True #True if objects are deleted from memory after being served
-CHAINSAVE = '/tmp/chain.p' #where to save the chain
-WAIT_TIME_MULTIPLIER = 0.5 #wait time for download multiplier
-PROXY_PATH = '/etc/swift/proxy-server.conf' #proxy configuration file
-MAX_TIME_IN_MEMORY = 30 #max seconds for an object to be in memory without being downloaded
+TOTALSECONDS = 60
+PROB_THRESHOLD = 0.2
+N_THREADS = 5
+AUTOSAVE = 30
+CHAINSAVE = '/tmp/chain.p'
+PROXY_PATH = '/etc/swift/proxy-server.conf'
 
 acc_status= [200]
-multiplier = 0.5
-prefetched_objects = OrderedDict()
+
+prefetched_objects = {}
 
 class Singleton(type):
     _instances = {}
@@ -40,40 +31,67 @@ class Singleton(type):
             cls._instances[cls] = super(Singleton, cls).__call__(*args, **kwargs)
         return cls._instances[cls]
 
-def delete_memory():
-    global multiplier
-    for oid in prefetched_objects:
-        data, resp_headers, time_stamp = prefetched_objects[oid]
-        if (dt.now()-time_stamp).total_seconds() >= MAX_TIME_IN_MEMORY:
-            del prefetched_objects[oid] 
-            print "Object " + oid + " deleted from memory"
-            multiplier = multiplier - 0.1
-            if multiplier < 0:
-                multiplier = 0 
-    threading.Timer(10, delete_memory).start()
-   
+
+ 
 def download(oid, acc, container, name, u_agent, token, delay=0, request_tries=5):
-    print 'Prefetching object with InternalClient: ' + oid + ' after ' + str(delay) + ' seconds of delay.'
-    #time.sleep(delay)
-    start_time = dt.now()
+    print 'Prefetching object with InternalClient: ' + oid + ' after ' + str(delay.total_seconds()) + ' seconds of delay.'
+    time.sleep(delay.total_seconds())
     swift = InternalClient(PROXY_PATH, u_agent, request_tries=request_tries)
     headers = {}
     headers['X-Auth-Token'] = token
     headers['X-No-Prefetch'] = 'True'
     status, head, it = swift.get_object(acc, container, name, headers, acc_status)
+    print 'Request to Swift - Response Status: ' + str(status) + ' Response headers: ' + str(head)
     data = [el for el in it]
-    end_time = dt.now()
-    diff = end_time - start_time
-    return (oid, data, head, end_time, diff)
+    return (oid, data, head)
+
+def download_curl(oid, server_add, server_port, path, token, delay=0, request_tries=5):
+    print 'Prefetching object with Curl: ' + oid + ' after ' + str(delay.total_seconds()) + ' seconds of delay.'
+    time.sleep(delay.total_seconds())
+    swift = 'http://'+server_add+':'+str(server_port)+path
+    req = urllib2.Request(swift)
+    req.add_header('X-Auth-Token', token)
+    req.add_header('X-No-Prefetch', 'True')
+
+    res = urllib2.urlopen(req)
+    print 'Request to: ' + swift + ' Response Status: ' + str(res.code) + ' Response headers: ' + str(res.info())
+
+    return (oid, res.read(), res.info())
+
+def download_swiftclient(oid, container, name, delay=0, request_tries=5):
+    try:
+        print 'Prefetching object with SwiftClient: ' + oid + ' after ' + str(delay.total_seconds()) + ' seconds of delay.'
+        time.sleep(delay.total_seconds())
+
+        _opts = {"auth_version": '2.0',  # Should be '2.0'
+                    "os_username": environ.get('OS_USERNAME'),
+                    "os_password": environ.get('OS_PASSWORD'),
+                    "os_tenant_name": environ.get('OS_TENANT_NAME'),
+                    "os_auth_url": environ.get('OS_AUTH_URL'),
+                    "retries": request_tries,
+                    }
+        headers = {"header": ["X-No-Prefetch:True"]}
+
+        with SwiftService(options=_opts) as swift:
+            for down_res in swift.download(
+                    container=container,
+                    objects=[name],
+                    options=headers):
+                if down_res['success']:
+                    print("'%s' downloaded" % down_res['object'])
+                    return (oid, down_res['object'], down_res['response_dict']['headers'])
+                else:
+                    print("'%s' download failed" % down_res['error'])
+                    return (oid, [], down_res['response_dict']['headers'])
+    except Error as e:
+        pass
+
 
 def log_result(result):
-    oid, data, headers, ts, diff = result
+    oid, data, headers = result
     if data:
-        while total_size(prefetched_objects) > MAX_PREFETCHED_SIZE:
-            print "MAX PREFETCHED SIZE: Deleting objects..."
-            prefetched_objects.popitem(last=True)
-        prefetched_objects[oid] = (data, headers, ts)
-        print "Object " + oid + " downloaded in " + str(diff.total_seconds()) + " seconds."
+        prefetched_objects[oid] = (data, headers)
+    print 'BSC: Prefetched ' + str(len(prefetched_objects)) + ' objects.'
 
 class JITPrefetching(object):
     
@@ -83,42 +101,38 @@ class JITPrefetching(object):
         self.logger = logger
         self.chain = Chain(logger)
         self.chain.auto_save(AUTOSAVE)
-        self.pool = NoDaemonPool(processes=N_THREADS)
-        delete_memory()
-
+        
+        
     def execute(self, req_resp, app_iter, requests_data):
         
         method = requests_data['method']
         if 'HTTP_X_NO_PREFETCH' not in req_resp.environ:
             if method.upper() == 'GET':
                 self.logger.info("BSC: filter prefetch GET Method")
-                #self.chain.load_chain()
+
                 object_path = req_resp.environ['PATH_INFO']
                 oid = (hashlib.md5(object_path).hexdigest())
-                print 'BSC: Prefetched ' + str(len(prefetched_objects)) + ' objects with total size ' + str(total_size(prefetched_objects))
+
+                data = self.get_prefetched(oid)
                 self.add_object_to_chain(oid, requests_data)
-                if PREFETCH:
-                    data, rheaders = self.get_prefetched(oid, requests_data['object'])
-                    self.prefetch_objects(oid, req_resp)
-                    if data:
-                        req_resp.response_headers = rheaders
-                        req_resp.response_headers['X-object-prefetched'] = 'True'
-                        return iter(data)
+                self.prefetch_objects(oid, req_resp)
+
+                if data:
+                    req_resp.response_headers ={}
+                    req_resp.response_headers['X-object-prefetched'] = 'True'
+                    return iter(data)
 
         return req_resp.environ['wsgi.input']
 
-    def get_prefetched(self, oid, name):
-        global multiplier
+    def get_prefetched(self, oid):
         if oid in prefetched_objects:
-            data, resp_headers, ts = prefetched_objects[oid]
-            multiplier = multiplier + 0.05
-            if multiplier > 1:
-                multiplier = 1
-            if DELETE_WHEN_SERVED:
-                del prefetched_objects[oid]
-                print 'Object '+name+' served and deleted'
-            return (data, resp_headers)
-        return (False, False)
+            data, resp_headers = prefetched_objects[oid]
+            print 'BSC prefetch Filter - Object '+oid+' in cache'              
+            # return Response(app_iter=iter(data),
+            #                 headers=resp_headers,
+            #                 request=req_resp) 
+            return data
+        return False
         
     def prefetch_objects(self, oid, req_resp):
         objs = self.chain.get_probabilities(oid)
@@ -130,32 +144,30 @@ class JITPrefetching(object):
         path = req_resp.environ['PATH_INFO']
         server_add = req_resp.environ['REMOTE_ADDR']
         server_port = req_resp.environ['SERVER_PORT']
-        
+        pool = NoDaemonPool(processes=N_THREADS)
         for oid, obj in objs:
             if oid not in prefetched_objects:
-                self.pool.apply_async(download, args=(oid, acc, obj.container, obj.name, user_agent, token, obj.time_stamp.total_seconds()*multiplier, ), callback=log_result)
+                pool.apply_async(download, args=(oid, acc, obj.container, obj.name, user_agent, token, obj.time_stamp, ), callback=log_result)
+                #pool.apply_async(download_swiftclient, args=(oid, obj.container, obj.name, obj.time_stamp, ), callback=log_result)
+                #pool.apply_async(download_curl, args=(oid, server_add, server_port, path, token, obj.time_stamp, ), callback=log_result)
+
 
     def add_object_to_chain(self, oid, requests_data):
         container = requests_data['container']
         object_name = requests_data['object']
         self.chain.add(oid, object_name, container)
-        #self.chain.save_chain()
-        self.chain.chain_length()
-        
+        self.chain.chain_stats()
+
+
 
 class Chain():
 
     def __init__(self, logger):
-        print "Init Chain"
         self.logger = logger     
         self._chain = {}
+        self.load_chain()
         self._last_oid = None
         self._last_ts = None
-        self.load_chain()
-
-    def __del__(self):
-        with open(CHAINSAVE, 'wb') as fp:
-            pickle.dump(self._chain, fp)
 
     def load_chain(self):
         try:
@@ -164,15 +176,11 @@ class Chain():
         except: 
             pass
 
-    def save_chain(self):
+    def auto_save(self, timer=300):
+        threading.Timer(timer, self.auto_save).start()
         with open(CHAINSAVE, 'wb') as fp:
             pickle.dump(self._chain, fp)
 
-    def auto_save(self, timer=30):
-        print "BSC: saving chain..."
-        self.save_chain()
-        threading.Timer(timer, self.auto_save, [timer]).start()
-        
 
     def _get_object_chain(self, oid):
         if oid in self._chain:
@@ -185,18 +193,18 @@ class Chain():
     def add(self, oid, name, container):
         if oid not in self._chain:
             self._chain[oid] = []
-    
-        diff = self._check_time_diff()
-        if diff:
-            objs = self._get_object_chain(self._last_oid)
-            found = False
-            for o in filter(lambda x: x.id()==oid, objs):
-                o.hit()
-                o.set_ts(diff)
-                found = True
-            if not found:
-                objs.append(ChainObject(oid, name, container, diff))
-            self._set_object_chain(self._last_oid, objs)
+        else:
+            diff = self._check_time_diff()
+            if diff:
+                objs = self._get_object_chain(self._last_oid)
+                found = False
+                for o in filter(lambda x: x.id()==oid, objs):
+                    o.hit()
+                    o.set_ts(diff)
+                    found = True
+                if not found:
+                    objs.append(ChainObject(oid, name, container, diff))
+                self._set_object_chain(self._last_oid, objs)
         self._last_oid = oid
         self._last_ts = dt.now()
 
@@ -207,14 +215,11 @@ class Chain():
                 return diff
 
     def chain_stats(self):
-        self.chain_length()
+        self.logger.info("CHAIN OBJECTS: " + str(len(self._chain)))
         for o in self._chain:
-            print "\tOBJECT: " + o
+            self.logger.info("   OBJECT: " + o)
             for och in self._chain[o]:
-                print "\t\tnext: " + och.object_to_string()
-
-    def chain_length(self):
-        print "Chain length: " + str(len(self._chain))
+                self.logger.info("     next: " + och.object_to_string())
 
     def get_probabilities(self, oid):
         probs1 = self._probabilities(self._get_object_chain(oid))
@@ -285,33 +290,3 @@ class NoDaemonProcess(multiprocessing.Process):
 
 class NoDaemonPool(multiprocessing.pool.Pool):
     Process = NoDaemonProcess
-
-
-def total_size(o, handlers={}):
-    """ Returns the approximate memory footprint an object and all of its contents.
-    """
-    dict_handler = lambda d: chain.from_iterable(d.items())
-    all_handlers = {tuple: iter,
-                    list: iter,
-                    deque: iter,
-                    dict: dict_handler,
-                    set: iter,
-                    frozenset: iter,
-                   }
-    all_handlers.update(handlers)     # user handlers take precedence
-    seen = set()                      # track which object id's have already been seen
-    default_size = getsizeof(0)       # estimate sizeof object without __sizeof__
-
-    def sizeof(o):
-        if id(o) in seen:       # do not double count the same object
-            return 0
-        seen.add(id(o))
-        s = getsizeof(o, default_size)
-       
-        for typ, handler in all_handlers.items():
-            if isinstance(o, typ):
-                s += sum(map(sizeof, handler(o)))
-                break
-        return s
-
-    return sizeof(o)

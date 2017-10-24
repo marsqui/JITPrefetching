@@ -39,6 +39,7 @@ class CacheControl(object):
             app_iter = self._put_object_in_cache(req_resp, app_iter)
 
         return app_iter
+
     
     def _get_object_from_cache(self, req_resp, app_iter):
         
