@@ -1,0 +1,5 @@
+Oct 21 17:11:36 iostack-proxy proxy-server: STDOUT: Object 2009021713112255.jpg served and deleted (txn: tx359283ac559941aab61f3-0059eb63a8) (client_ip: 10.30.1.21)
+Oct 21 17:11:50 iostack-proxy proxy-server: STDOUT: Object 2015031712441719.txt served and deleted (txn: txea50257c4bf44403a13c6-0059eb63b6) (client_ip: 10.30.1.21)
+Oct 21 17:12:22 iostack-proxy proxy-server: STDOUT: Object 2008042512172983.jpg served and deleted (txn: txeaf2d0de401f4dddadf20-0059eb63d6) (client_ip: 10.30.1.21)
+Oct 21 17:12:37 iostack-proxy proxy-server: STDOUT: Object 2008042513195289.jpg served and deleted (txn: tx03abad36bac0413691095-0059eb63e5) (client_ip: 10.30.1.21)
+Oct 21 17:12:38 iostack-proxy proxy-server: STDOUT: Object 2009091810382797.jpg served and deleted (txn: tx316986c04f494cbcab559-0059eb63e6) (client_ip: 10.30.1.21)
