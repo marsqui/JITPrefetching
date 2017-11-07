@@ -38,9 +38,9 @@ plt.boxplot(diffs)
 plt.title('Time differences')
 plt.show()
 
-#plt.hist(size, bins='auto')
-#plt.title('Size')
-#plt.show()
+plt.hist(size, bins='auto')
+plt.title('Size')
+plt.show()
 
 plt.plot(size)
 plt.title('Size')
