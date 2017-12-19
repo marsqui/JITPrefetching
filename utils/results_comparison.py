@@ -8,14 +8,15 @@ import matplotlib.pyplot as plt
 def main(file_noprefetch, file_prefetch, number):
 	noprefetch = csv.reader(file_noprefetch, delimiter='\t')
 	prefetch = csv.reader(file_prefetch, delimiter='\t')
-
+ 	sizes = []
 	total_no = 0
 	total_pref = 0
 	time_differences = []
 	for rown, row in zip(noprefetch, prefetch)[:number]:
 		total_no = total_no + float(rown[3])
 		total_pref = total_pref + float(row[3])
-		time_differences.append( (float(row[3]) - float(rown[3])) )
+		sizes.append(float(rown[4]))
+		time_differences.append( (float(rown[3]) - float(row[3])) )
 
 	print "Total download time with no prefetch: "+ str(total_no)
 	print "Total download time with prefetch: "+ str(total_pref)
@@ -23,7 +24,7 @@ def main(file_noprefetch, file_prefetch, number):
 
 def plots(data, title='', number=1, normal=True, boxplot=True, histo=True, ecdf=False):
 	if normal:
-		plt.stem(data)
+		plt.scatter(np.arange(0,len(data),1), data)
 		plt.title(title)
 		plt.show()
 
